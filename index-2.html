@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Object Learning Task</title>
+<style>
+  :root { --obj: min(110px, 11.5vw); --big: min(160px, 38vw); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #fff; color: #111; }
+  #app { max-width: 1000px; margin: 0 auto; min-height: 100vh; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; padding: 56px 16px 24px; text-align: center; }
+  #quit { position: fixed; top: 10px; right: 10px; display: none; padding: 6px 12px; font-size: 14px;
+          background: #d9534f; color: #fff; border: 0; border-radius: 6px; cursor: pointer; z-index: 10; }
+  .message { font-size: 22px; line-height: 1.45; white-space: pre-line; max-width: 760px; margin-bottom: 28px; }
+  .small { font-size: 15px; color: #555; white-space: pre-line; max-width: 760px; }
+  .warn { font-size: 14px; color: #8a5a00; background: #fff4d6; border: 1px solid #f0d58a; border-radius: 6px;
+          padding: 8px 12px; max-width: 760px; margin: 12px 0; }
+  .btn { font-size: 18px; padding: 10px 22px; border: 0; border-radius: 8px; background: #2d6cdf; color: #fff; cursor: pointer; margin: 6px; }
+  .btn.secondary { background: #666; }
+  .btn:disabled { background: #aaa; cursor: default; }
+  input[type=text] { font-size: 18px; padding: 8px 10px; border: 1px solid #aaa; border-radius: 6px; width: 220px; margin: 4px; }
+  label { display: block; margin: 8px 0 2px; font-size: 16px; }
+  .row { display: flex; justify-content: center; gap: calc(var(--obj) * 0.27); }
+  .cell { display: flex; flex-direction: column; align-items: center; }
+  .obj { width: var(--obj); height: var(--obj); object-fit: contain; cursor: pointer; user-select: none; -webkit-user-drag: none; }
+  .obj.done { cursor: default; }
+  .reward { height: 38px; font-size: 28px; font-weight: bold; color: green; }
+  .status { margin-top: 36px; font-size: 20px; color: #333; min-height: 28px; }
+  .question { font-size: 30px; font-weight: bold; margin-bottom: 40px; }
+  .pair { display: flex; justify-content: center; gap: min(200px, 16vw); }
+  .big { width: var(--big); height: var(--big); object-fit: contain; cursor: pointer; user-select: none; -webkit-user-drag: none; }
+  .fixation { font-size: 60px; }
+  .feedback { font-size: 36px; font-weight: bold; margin-bottom: 20px; }
+  .slot { width: calc(var(--obj) + 10px); height: calc(var(--obj) + 10px); border: 2px solid #000; display: flex;
+          align-items: center; justify-content: center; }
+  .slot img { width: var(--obj); height: var(--obj); object-fit: contain; }
+  .palette { margin-top: 60px; }
+  .score { margin-top: 30px; font-size: 28px; }
+  .files { display: flex; flex-direction: column; align-items: center; }
+</style>
+</head>
+<body>
+<button id="quit">Quit &amp; save data</button>
+<div id="app"></div>
+
+<script>
+"use strict";
+/* =======================================================================
+   TI + Bandit task (web version of TI_bandit_task.py)
+   -----------------------------------------------------------------------
+   - 3 blocks (linear_positive, linear_negative, random) in a random order
+     for every participant, 5 rounds per block.
+   - Every block has its OWN 7 objects: images/block1, images/block2, images/block3
+     (stim1 ... stim7, .png / .jpg / .jpeg). Missing images are replaced by
+     coloured placeholder shapes so the task can be tested straight away.
+   - Round = bandit phase (pick 3 of 7) -> TI phase (21 pairs) -> order recall.
+   - At the end (or when quitting) the data are downloaded as 4 CSV files with
+     the same columns as the PsychoPy version.
+   ======================================================================= */
+
+// ---------------- settings you can change ----------------
+const N_STIM = 7;            // objects per block
+const N_BLOCKS = 3;
+const N_ROUNDS = 5;          // rounds per block
+const N_PICKS = 3;           // objects the participant samples per round
+const NOISE_SD = 8;          // reward noise (Gaussian SD); 0 = exact numbers
+
+// Average reward of the 7 objects in SCREEN POSITION ORDER (first = leftmost).
+const LINEAR_UP = [10, 23, 37, 50, 63, 77, 90];
+const LINEAR_DOWN = LINEAR_UP.slice().reverse();
+const RANDOM_FIXED = [50, 10, 77, 37, 90, 23, 63];   // patternless, same in all rounds
+const REWARD_MEANS = {
+  linear_positive: { 1: LINEAR_UP,   2: LINEAR_UP,   3: LINEAR_UP,   4: LINEAR_UP,   5: LINEAR_UP },
+  linear_negative: { 1: LINEAR_DOWN, 2: LINEAR_DOWN, 3: LINEAR_DOWN, 4: LINEAR_DOWN, 5: LINEAR_DOWN },
+  random:          { 1: RANDOM_FIXED, 2: RANDOM_FIXED, 3: RANDOM_FIXED, 4: RANDOM_FIXED, 5: RANDOM_FIXED },
+};
+const IMAGE_EXTS = ['jpg', 'png', 'jpeg', 'JPG', 'PNG', 'JPEG'];
+
+// ---------------- helpers ----------------
+const app = document.getElementById('app');
+const quitBtn = document.getElementById('quit');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const now = () => performance.now() / 1000;
+const range = n => Array.from({ length: n }, (_, i) => i);
+function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function gauss() { let u = 0, v = 0; while (u === 0) u = Math.random(); while (v === 0) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+function r3(x) { return Math.round(x * 1000) / 1000; }
+function r2(x) { return Math.round(x * 100) / 100; }
+function r1(x) { return Math.round(x * 10) / 10; }
+
+let aborted = false;
+class Abort extends Error {}
+function clear(force) { if (aborted && !force) throw new Abort(); app.innerHTML = ''; }
+function make(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+
+function waitContinue(text, label) {
+  return new Promise(resolve => {
+    clear();
+    app.appendChild(make('div', 'message', text));
+    const btn = make('button', 'btn', (label || 'Continue') + ' (SPACE)');
+    const done = () => { document.removeEventListener('keydown', onKey); resolve(); };
+    const onKey = e => { if (e.code === 'Space') { e.preventDefault(); done(); } };
+    btn.onclick = done;
+    document.addEventListener('keydown', onKey);
+    app.appendChild(btn);
+  });
+}
+
+// ---------------- data ----------------
+const HEADERS = {
+  bandit: ['participant', 'block_num', 'block_condition', 'round_num', 'click_order', 'stim_id', 'true_rank', 'reward', 'rt'],
+  ti: ['participant', 'block_num', 'block_condition', 'round_num', 'trial_num', 'left_stim', 'right_stim',
+       'left_reward_level', 'right_reward_level', 'correct_side', 'response_stim', 'correct', 'rt'],
+  recall: ['participant', 'block_num', 'block_condition', 'round_num', 'slot_position', 'placed_stim', 'correct_stim', 'correct', 'rt'],
+  hierarchy: ['stim_id', 'stim_file', 'true_rank', 'sequence_position', 'block_num'],
+};
+const data = { bandit: [], ti: [], recall: [], hierarchy: [] };
+let participant = '', session = '', dateStr = '';
+
+function csvCell(v) { const s = String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCSV(kind, rows) { return [HEADERS[kind]].concat(rows).map(r => r.map(csvCell).join(',')).join('\n') + '\n'; }
+function fileName(kind) { return `${participant}_${session}_${dateStr}_${kind}.csv`; }
+function downloadText(name, text) {
+  const blob = new Blob([text], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+async function downloadAll() {
+  for (const kind of ['bandit', 'ti', 'recall', 'hierarchy']) { downloadText(fileName(kind), toCSV(kind, data[kind])); await sleep(400); }
+}
+function saveBackup() {
+  try { localStorage.setItem('tibandit_backup', JSON.stringify({ participant, session, dateStr, data })); } catch (e) {}
+}
+
+// ---------------- images ----------------
+const imageSrc = {};   // global stim id -> src
+const imageFile = {};  // global stim id -> file name for hierarchy.csv
+let nPlaceholders = 0;
+
+function tryLoad(src) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const t = setTimeout(() => resolve(false), 4000);
+    img.onload = () => { clearTimeout(t); resolve(true); };
+    img.onerror = () => { clearTimeout(t); resolve(false); };
+    img.src = src;
+  });
+}
+function placeholderSVG(block, k) {
+  const hue = (block - 1) * 40 + (k - 1) * 47;
+  const c = `hsl(${hue % 360},65%,55%)`;
+  const shapes = [
+    `<circle cx="50" cy="50" r="38" fill="${c}"/>`,
+    `<rect x="14" y="14" width="72" height="72" fill="${c}"/>`,
+    `<polygon points="50,10 92,86 8,86" fill="${c}"/>`,
+    `<polygon points="50,6 94,50 50,94 6,50" fill="${c}"/>`,
+    `<polygon points="50,8 61,38 93,38 67,57 77,89 50,70 23,89 33,57 7,38 39,38" fill="${c}"/>`,
+    `<polygon points="28,10 72,10 94,50 72,90 28,90 6,50" fill="${c}"/>`,
+    `<polygon points="38,8 62,8 62,38 92,38 92,62 62,62 62,92 38,92 38,62 8,62 8,38 38,38" fill="${c}"/>`,
+  ];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">${shapes[(k - 1) % 7]}</svg>`;
+  return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+}
+async function loadImage(block, k) {
+  const id = (block - 1) * N_STIM + (k - 1);
+  for (const ext of IMAGE_EXTS) {
+    const path = `images/block${block}/stim${k}.${ext}`;
+    if (await tryLoad(path)) { imageSrc[id] = path; imageFile[id] = `block${block}/stim${k}.${ext}`; return; }
+  }
+  imageSrc[id] = placeholderSVG(block, k); imageFile[id] = `placeholder_block${block}_stim${k}`; nPlaceholders++;
+}
+function imgEl(id, cls) { const e = make('img', cls); e.src = imageSrc[id]; e.draggable = false; e.alt = ''; return e; }
+
+// ---------------- design (set when the experiment starts) ----------------
+let blockOrder = [], blockStimIds = {}, rankMap = {}, seqOrder = {};
+function setupDesign() {
+  blockOrder = shuffle(['linear_positive', 'linear_negative', 'random']);
+  for (let b = 1; b <= N_BLOCKS; b++) {
+    const ids = range(N_STIM).map(i => (b - 1) * N_STIM + i);
+    blockStimIds[b] = ids;
+    const ranks = shuffle(range(N_STIM).map(i => i + 1));
+    ids.forEach((id, i) => { rankMap[id] = ranks[i]; });
+    seqOrder[b] = ids.slice().sort((x, y) => rankMap[x] - rankMap[y]);
+    seqOrder[b].forEach((id, pos) => data.hierarchy.push([id, imageFile[id], rankMap[id], pos, b]));
+  }
+}
+function roundRewardMap(block, condition, round) {
+  const means = REWARD_MEANS[condition][round], m = {};
+  seqOrder[block].forEach((id, i) => { m[id] = means[i]; });
+  return m;
+}
+function getReward(mean) { return Math.min(100, Math.max(0, mean + NOISE_SD * gauss())); }
+
+// ---------------- phases ----------------
+async function banditPhase(b, cond, r, rmap) {
+  await waitContinue(`Block ${b} - Round ${r}\n\nChoose ${N_PICKS} of the objects you want to see the reward of.`, 'Begin');
+  clear();
+  const row = make('div', 'row');
+  const status = make('div', 'status');
+  const rewardLabels = {};
+  const cells = {};
+  seqOrder[b].forEach(id => {
+    const cell = make('div', 'cell'), lab = make('div', 'reward'), img = imgEl(id, 'obj');
+    cell.appendChild(lab); cell.appendChild(img); row.appendChild(cell);
+    rewardLabels[id] = lab; cells[id] = img;
+  });
+  app.appendChild(row); app.appendChild(status);
+  let clicked = [], last = now();
+  status.textContent = `Choose ${N_PICKS} more...`;
+  await new Promise(resolve => {
+    seqOrder[b].forEach(id => {
+      cells[id].onclick = () => {
+        if (clicked.includes(id) || clicked.length >= N_PICKS) return;
+        const rt = now() - last; last = now();
+        const reward = getReward(rmap[id]);
+        clicked.push(id);
+        rewardLabels[id].textContent = Math.round(reward);
+        cells[id].classList.add('done');
+        data.bandit.push([participant, b, cond, r, clicked.length, id, rankMap[id], r2(reward), r3(rt)]);
+        status.textContent = clicked.length < N_PICKS ? `Choose ${N_PICKS - clicked.length} more...` : '';
+        if (clicked.length >= N_PICKS) resolve();
+      };
+    });
+  });
+  await sleep(1500);
+}
+
+function faceSVG(correct) {
+  const col = correct ? 'forestgreen' : 'firebrick';
+  const mouth = correct ? 'M 30 62 Q 50 84 70 62' : 'M 30 74 Q 50 52 70 74';
+  const wrap = make('div'); wrap.style.width = '180px'; wrap.style.height = '180px';
+  wrap.innerHTML = `<svg viewBox="0 0 100 100" width="180" height="180"><circle cx="50" cy="50" r="44" fill="none" stroke="${col}" stroke-width="5"/>` +
+    `<circle cx="35" cy="40" r="5" fill="${col}"/><circle cx="65" cy="40" r="5" fill="${col}"/>` +
+    `<path d="${mouth}" fill="none" stroke="${col}" stroke-width="5" stroke-linecap="round"/></svg>`;
+  return wrap;
+}
+
+async function tiPhase(b, cond, r, rmap) {
+  await waitContinue(`Block ${b} - Round ${r}\n\nTry to choose the bigger object between the 2,\nbased on the rewards you saw before.`, 'Begin');
+  const ids = blockStimIds[b], pairs = [];
+  for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) pairs.push([ids[i], ids[j]]);
+  const order = shuffle(pairs);
+  let trial = 0;
+  for (const [a, c] of order) {
+    trial++;
+    const [L, R] = Math.random() < 0.5 ? [a, c] : [c, a];
+    // fixation
+    clear(); app.appendChild(make('div', 'fixation', '+')); await sleep(500);
+    // choice screen
+    clear();
+    app.appendChild(make('div', 'question', 'Which one is bigger?'));
+    const pair = make('div', 'pair'), li = imgEl(L, 'big'), ri = imgEl(R, 'big');
+    pair.appendChild(li); pair.appendChild(ri); app.appendChild(pair);
+    const t0 = now();
+    const resp = await new Promise(resolve => { li.onclick = () => resolve([L, now() - t0]); ri.onclick = () => resolve([R, now() - t0]); });
+    const correctSide = rmap[L] > rmap[R] ? 'left' : 'right';
+    const respSide = resp[0] === L ? 'left' : 'right';
+    const correct = respSide === correctSide ? 1 : 0;
+    // feedback
+    clear();
+    app.appendChild(make('div', 'feedback', correct ? 'Correct!' : 'Wrong'));
+    app.appendChild(faceSVG(!!correct));
+    data.ti.push([participant, b, cond, r, trial, L, R, r1(rmap[L]), r1(rmap[R]), correctSide, resp[0], correct, r3(resp[1])]);
+    await sleep(1000);
+    clear(); await sleep(200);
+  }
+}
+
+async function recallPhase(b, cond, r) {
+  clear();
+  app.appendChild(make('div', 'status', 'Click the objects, in order, from left to right'));
+  const slotsRow = make('div', 'row'), palRow = make('div', 'row palette');
+  slotsRow.style.marginTop = '30px';
+  const slots = range(N_STIM).map(() => { const s = make('div', 'slot'); slotsRow.appendChild(s); return s; });
+  app.appendChild(slotsRow); app.appendChild(palRow);
+  const placed = [];
+  let last = now();
+  await new Promise(resolve => {
+    shuffle(seqOrder[b]).forEach(id => {
+      const img = imgEl(id, 'obj');
+      img.onclick = () => {
+        if (placed.includes(id)) return;
+        const rt = now() - last; last = now();
+        const slot = placed.length, correctId = seqOrder[b][slot];
+        placed.push(id);
+        img.style.visibility = 'hidden'; img.style.pointerEvents = 'none';
+        slots[slot].appendChild(imgEl(id));
+        data.recall.push([participant, b, cond, r, slot, id, correctId, id === correctId ? 1 : 0, r3(rt)]);
+        if (placed.length === N_STIM) resolve();
+      };
+      palRow.appendChild(img);
+    });
+  });
+  const nCorrect = placed.filter((id, i) => id === seqOrder[b][i]).length;
+  app.appendChild(make('div', 'score', `You got ${nCorrect}/${N_STIM} correct!`));
+  await sleep(2000);
+}
+
+// ---------------- screens ----------------
+function endScreen(completed) {
+  clear(true);
+  quitBtn.style.display = 'none';
+  app.appendChild(make('div', 'message', completed ? "You're all done!\n\nThank you for participating." :
+    'The task was stopped early.\n\nYou can still download the data collected so far.'));
+  app.appendChild(make('div', 'small', 'Please download your data files and send all four to the experimenter.\nIf only one file downloads, use the individual buttons below.'));
+  const box = make('div', 'files');
+  const all = make('button', 'btn', 'Download all 4 files'); all.onclick = () => downloadAll(); box.appendChild(all);
+  for (const kind of ['bandit', 'ti', 'recall', 'hierarchy']) {
+    const b = make('button', 'btn secondary', `Download ${kind}.csv`); b.onclick = () => downloadText(fileName(kind), toCSV(kind, data[kind])); box.appendChild(b);
+  }
+  app.appendChild(box);
+  saveBackup();
+}
+
+async function runExperiment() {
+  try {
+    await waitContinue('Welcome to the experiment!\n\n' +
+      'In each block you will see a new set of 7 objects in a fixed order. In each round you will explore their rewards, ' +
+      'judge which of two objects is bigger, and finally recall the order of the objects.\n\n' +
+      "We'll remind you what to do before each part.", 'Begin');
+    for (let b = 1; b <= N_BLOCKS; b++) {
+      const cond = blockOrder[b - 1];
+      await waitContinue(`Block ${b} of ${N_BLOCKS}\n\nYou will see a new set of 7 objects in this block.`, 'Begin');
+      for (let r = 1; r <= N_ROUNDS; r++) {
+        const rmap = roundRewardMap(b, cond, r);
+        await banditPhase(b, cond, r, rmap);
+        await tiPhase(b, cond, r, rmap);
+        await recallPhase(b, cond, r);
+        saveBackup();
+      }
+    }
+    endScreen(true);
+  } catch (e) { if (!(e instanceof Abort)) { console.error(e); } }
+}
+
+quitBtn.onclick = () => { if (confirm('Quit the task now? Your data so far can still be downloaded.')) { aborted = true; endScreen(false); } };
+
+async function startScreen() {
+  clear(true);
+  app.appendChild(make('div', 'message', 'Object Learning Task'));
+  const status = make('div', 'small', 'Loading images...');
+  app.appendChild(status);
+  await Promise.all(range(N_BLOCKS).flatMap(b => range(N_STIM).map(k => loadImage(b + 1, k + 1))));
+  status.remove();
+  if (nPlaceholders > 0) app.appendChild(make('div', 'warn', `Demo mode: ${nPlaceholders} of ${N_BLOCKS * N_STIM} images were not found in the "images" folder, so coloured placeholder shapes are used for them.`));
+  const idLab = make('label', null, 'Participant ID'), idIn = make('input'); idIn.type = 'text'; idIn.placeholder = 'e.g. anna'; idLab.appendChild(document.createElement('br')); idLab.appendChild(idIn);
+  const seLab = make('label', null, 'Session'), seIn = make('input'); seIn.type = 'text'; seIn.value = '001'; seLab.appendChild(document.createElement('br')); seLab.appendChild(seIn);
+  app.appendChild(idLab); app.appendChild(seLab);
+  const go = make('button', 'btn', 'Start'); app.appendChild(go);
+  app.appendChild(make('div', 'small', 'Please play in one go and do not close this tab.\nYou will download your data files at the end.'));
+  try {
+    const bk = JSON.parse(localStorage.getItem('tibandit_backup') || 'null');
+    if (bk && bk.data && bk.data.ti && bk.data.ti.length) {
+      const rec = make('button', 'btn secondary', 'Recover data from an interrupted session');
+      rec.onclick = () => { Object.assign(data, bk.data); participant = bk.participant; session = bk.session; dateStr = bk.dateStr; downloadAll(); };
+      app.appendChild(rec);
+    }
+  } catch (e) {}
+  go.onclick = () => {
+    const id = idIn.value.trim().replace(/[^A-Za-z0-9_-]/g, '');
+    if (!id) { idIn.focus(); idIn.style.borderColor = 'red'; return; }
+    participant = id; session = seIn.value.trim().replace(/[^A-Za-z0-9_-]/g, '') || '001';
+    const d = new Date(), p = (n, w) => String(n).padStart(w || 2, '0');
+    dateStr = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}h${p(d.getMinutes())}_${p(d.getSeconds())}_${p(d.getMilliseconds(), 3)}`;
+    setupDesign();
+    quitBtn.style.display = 'block';
+    runExperiment();
+  };
+}
+startScreen();
+</script>
+</body>
+</html>
